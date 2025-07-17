@@ -1,0 +1,10 @@
+# core dependencies
+tensorflow
+
+numpy
+scipy
+Pillow       # for image I/O / resizing (replaces PIL)
+matplotlib  # for plotting (used in some notebooks/examples)
+
+# optional, but handy for CLI progress/status
+tqdm
