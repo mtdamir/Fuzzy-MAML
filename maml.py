@@ -1,8 +1,9 @@
-from __future__ import print_function
 import sys
 import numpy as np
 import tensorflow as tf
 from utils import mse, xent, conv_block
+from fuzzy_utils import fuzzy_lr_scaling, task_weight_fuzzy  # import fuzzy functions
+from rule_extractor import extract_fuzzy_rules  # import rule extractor
 
 try:
     import special_grads
@@ -67,7 +68,7 @@ class MAML:
         self.weights = self._init_weights()
         self.optimizer = tf.keras.optimizers.Adam(self.meta_lr)
 
-    # ---------------- weight init (same as قبلی) -------------------------
+    # ---------------- weight init (same as previous) -------------------------
     def _init_weights(self):
         if self.datasource == 'sinusoid':
             return self._build_fc(self.dim_hidden)
@@ -92,7 +93,7 @@ class MAML:
         w['b5'] = tf.Variable(tf.zeros([self.dim_output]))
         return w
 
-    # ---------------- forward (همان قبلی) -------------------------------
+    # ---------------- forward (same as previous) -------------------------------
     def forward_fc(self, x, w):
         h = tf.nn.relu(tf.matmul(x, w['w1']) + w['b1'])
         h = tf.nn.relu(tf.matmul(h, w['w2']) + w['b2'])
@@ -111,7 +112,7 @@ class MAML:
     def forward(self, x, w):
         return self.forward_fc(x, w) if not self.classification else self.forward_conv(x, w)
 
-    # ---------------- meta‑train (با فازی) -------------------------------
+    # ---------------- meta‑train (with fuzzy logic) -------------------------------
     def meta_train_step(self, batch):
         with tf.GradientTape() as outer_tape:
             meta_losses = []
@@ -128,17 +129,22 @@ class MAML:
                     grads = inner.gradient(loss_a, list(fast.values()))
                     fast = {n: w - self.update_lr*tf.stop_gradient(g) if g is not None else w
                             for (n,w,g) in zip(fast.keys(), fast.values(), grads)}
+
                 # query loss
                 pred_b = self.forward(xb, fast)
                 loss_b = tf.reduce_mean(tf.nn.softmax_cross_entropy_with_logits(labels=yb, logits=pred_b))
-                # task importance via avg reliability of support set
-                task_w = task_weight_fuzzy(tf.reduce_mean(ra))
-                meta_losses.append(task_w * loss_b)
-                task_weights.append(task_w)
+                
+                # fuzzy task importance based on avg reliability
+                task_weight = task_weight_fuzzy(tf.reduce_mean(ra))
+                meta_losses.append(task_weight * loss_b)
+                task_weights.append(task_weight)
+
             meta_loss = tf.add_n(meta_losses) / tf.cast(len(meta_losses), tf.float32)
+
         # outer gradients
         grads = outer_tape.gradient(meta_loss, list(self.weights.values()))
         grads = [g if g is not None else tf.zeros_like(v) for g,v in zip(grads, self.weights.values())]
         self.optimizer.apply_gradients(zip(grads, self.weights.values()))
+
         # return meta_loss for logging
         return meta_loss, tf.reduce_mean(task_weights)

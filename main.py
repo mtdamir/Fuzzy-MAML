@@ -5,8 +5,8 @@ import numpy as np
 import tensorflow as tf
 
 from data_generator import DataGenerator
-from maml import MAML, reliability_image, fuzzy_lr_scaling   # imports from your fuzzy maml.py
-
+from maml import MAML, reliability_image, fuzzy_lr_scaling, task_weight_fuzzy
+from rule_extractor import extract_fuzzy_rules
 
 # ---------------------------------------------------------------------------
 # Utility: robust boolean parser
@@ -21,9 +21,8 @@ def str2bool(v):
         return False
     raise argparse.ArgumentTypeError('Boolean value expected.')
 
-
 # ---------------------------------------------------------------------------
-# Image‑loading helper   (*** now present, fixes NameError ***)
+# Image‑loading helper
 # ---------------------------------------------------------------------------
 def load_and_preprocess(img_path, img_size, channels):
     """
@@ -39,9 +38,8 @@ def load_and_preprocess(img_path, img_size, channels):
     img = tf.cast(img, tf.float32) / 255.0
     return tf.reshape(img, [-1])   # [dim_input]
 
-
 # ---------------------------------------------------------------------------
-# Argparse (shortened)
+# Argparse
 # ---------------------------------------------------------------------------
 parser = argparse.ArgumentParser()
 parser.add_argument('--datasource',          default='miniimagenet')
@@ -54,7 +52,7 @@ parser.add_argument('--meta_lr',          type=float, default=1e-3)
 parser.add_argument('--update_lr',        type=float, default=1e-2)
 parser.add_argument('--iters',            type=int,   default=10000)
 parser.add_argument('--seed',             type=int,   default=42)
-args = parser.parse_args()               # ← if running via CLI
+args = parser.parse_args()
 
 # ---------------------------------------------------------------------------
 # Reproducibility
@@ -71,8 +69,7 @@ dg   = DataGenerator(args.update_batch_size + args.query_batch_size,
 maml = MAML(dg.dim_input, dg.dim_output, args)
 
 # ---------------------------------------------------------------------------
-# Helper: sample one meta‑batch **with fuzzy reliability tensors**
-# returns list of tuples (xa, ya, ra, xb, yb)
+# Helper: sample one meta‑batch with fuzzy reliability tensors
 # ---------------------------------------------------------------------------
 def sample_meta_batch():
     tasks = []
@@ -102,7 +99,7 @@ def sample_meta_batch():
                 img = load_and_preprocess(p, img_size, channels)
                 xa.append(img)
                 ya.append(tf.one_hot(cls_idx, N))
-                # reliability per sample  (scalar tensor)
+                # reliability per sample (scalar tensor)
                 ra.append(reliability_image(img[None])[0])
 
             # -------- query ---------
@@ -111,7 +108,7 @@ def sample_meta_batch():
                 xb.append(img)
                 yb.append(tf.one_hot(cls_idx, N))
 
-        tasks.append((
+        tasks.append(( 
             tf.stack(xa), tf.stack(ya), tf.stack(ra),   # support + reliability
             tf.stack(xb), tf.stack(yb)                  # query
         ))
@@ -129,8 +126,18 @@ for it in range(args.iters):
     if it % 100 == 0:
         print(f'Iter {it:6d} │ meta‑loss = {meta_loss.numpy():.4f}')
 
-        # fuzzy adjustment of meta learning‑rate
+        # fuzzy adjustment of meta learning-rate
         scale = fuzzy_lr_scaling(meta_loss)
         maml.optimizer.learning_rate.assign(args.meta_lr * scale)
+
+        # استخراج رول‌ها و اعمال آنها بر تسک‌ها
+        for (xa, ya, ra, xb, yb) in meta_batch:
+            avg_rel = tf.reduce_mean(ra)
+            task_weight = task_weight_fuzzy(avg_rel)
+            print(f"Task Weight: {task_weight.numpy()}")
+
+        # استخراج قوانین فازی برای تسک‌ها
+        fuzzy_rules = extract_fuzzy_rules(xa.numpy(), n_clusters=3)
+        print(f"Extracted Fuzzy Rules: {fuzzy_rules}")
 
 print('Training finished.')
