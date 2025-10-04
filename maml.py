@@ -11,33 +11,26 @@ except KeyError as e:
     print("WARN: Cannot define MaxPoolGrad: %s" % e, file=sys.stderr)
 
 # ------------------------- Fuzzy helper functions -------------------------
-# sample‑level reliability for images: simple brightness rule (0=dark → low r)
+# sample‑level reliability for images: ترکیب brightness و variance (تیون: variance ضریب 0.5 برای تأثیر کمتر)
 @tf.function
 def reliability_image(batch_pixels):
     """Input [B, dim_input] in [0,1]; return [B] in [0,1]."""
     mean_pix = tf.reduce_mean(batch_pixels, axis=-1)  # brightness
-    return tf.clip_by_value(mean_pix, 0.0, 1.0)
+    var_pix = tf.math.reduce_variance(batch_pixels, axis=-1)  # variance برای نویز/عدم قطعیت
+    return tf.clip_by_value(mean_pix * (1 - 0.5 * var_pix), 0.0, 1.0)  # تیون برای تنوع بیشتر
 
 # task‑level importance fuzzy rule (low/med/high based on avg reliability)
 @tf.function
 def task_weight_fuzzy(avg_rel):
     # triangular membership
-    if avg_rel < 0.3:
-        return 0.8
-    elif avg_rel < 0.6:
-        return 0.5
-    else:
-        return 0.2
+    return tf.cond(avg_rel < 0.4, lambda: 0.8,
+                   lambda: tf.cond(avg_rel < 0.5, lambda: 0.5, lambda: 0.2))
 
 # meta‑lr scaling (same as before)
 @tf.function
 def fuzzy_lr_scaling(avg_loss):
-    if avg_loss < 0.5:
-        return 1.2
-    elif avg_loss < 1.0:
-        return 1.0
-    else:
-        return 0.8
+    return tf.cond(avg_loss < 0.5, lambda: 1.2,
+                   lambda: tf.cond(avg_loss < 1.0, lambda: 1.0, lambda: 0.8))
 
 class MAML:
     def __init__(self, dim_input, dim_output, args):
@@ -116,8 +109,13 @@ class MAML:
     def meta_train_step(self, batch):
         with tf.GradientTape() as outer_tape:
             meta_losses = []
+            meta_accs = []  # لیست برای acc هر تسک
             task_weights = []
             for (xa, ya, ra, xb, yb) in batch:
+                # ادغام FCM: استخراج عضویت‌ها برای وزن‌دهی فازی بیشتر
+                _, u = extract_fuzzy_rules(xa.numpy(), n_clusters=3, return_u=True)  # تغییر: return_u=True اضافه شده
+                u_mean = tf.reduce_mean(tf.convert_to_tensor(u, dtype=tf.float32), axis=1)  # میانگین عضویت per sample
+                
                 # inner loop
                 fast = {k:v for k,v in self.weights.items()}
                 for _ in range(self.num_updates):
@@ -125,7 +123,8 @@ class MAML:
                         inner.watch(list(fast.values()))
                         pred_a = self.forward(xa, fast)
                         loss_a_elem = tf.nn.softmax_cross_entropy_with_logits(labels=ya, logits=pred_a)
-                        loss_a = tf.reduce_mean(ra * loss_a_elem)  # reliability weighting
+                        # ترکیب FCM با reliability: نقش فازی داده‌های قدیمی
+                        loss_a = tf.reduce_mean(ra * u_mean * loss_a_elem)  # حالا ra * u_mean * elem
                     grads = inner.gradient(loss_a, list(fast.values()))
                     fast = {n: w - self.update_lr*tf.stop_gradient(g) if g is not None else w
                             for (n,w,g) in zip(fast.keys(), fast.values(), grads)}
@@ -134,17 +133,24 @@ class MAML:
                 pred_b = self.forward(xb, fast)
                 loss_b = tf.reduce_mean(tf.nn.softmax_cross_entropy_with_logits(labels=yb, logits=pred_b))
                 
+                # محاسبه acc روی query set
+                pred_classes = tf.argmax(pred_b, axis=1)
+                true_classes = tf.argmax(yb, axis=1)
+                acc_b = tf.reduce_mean(tf.cast(tf.equal(pred_classes, true_classes), tf.float32))
+                
                 # fuzzy task importance based on avg reliability
                 task_weight = task_weight_fuzzy(tf.reduce_mean(ra))
                 meta_losses.append(task_weight * loss_b)
+                meta_accs.append(acc_b)  # acc بدون وزن‌دهی (برای لاگ میانگین ساده)
                 task_weights.append(task_weight)
 
             meta_loss = tf.add_n(meta_losses) / tf.cast(len(meta_losses), tf.float32)
+            meta_acc = tf.reduce_mean(meta_accs)  # میانگین acc تسک‌ها
 
         # outer gradients
         grads = outer_tape.gradient(meta_loss, list(self.weights.values()))
         grads = [g if g is not None else tf.zeros_like(v) for g,v in zip(grads, self.weights.values())]
         self.optimizer.apply_gradients(zip(grads, self.weights.values()))
 
-        # return meta_loss for logging
-        return meta_loss, tf.reduce_mean(task_weights)
+        # return meta_loss, meta_acc, mean_task_weights برای logging
+        return meta_loss, meta_acc, tf.reduce_mean(task_weights)

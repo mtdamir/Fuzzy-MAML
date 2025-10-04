@@ -1,6 +1,6 @@
 import numpy as np
 
-# Functions for fuzzy membership
+# Functions for fuzzy membership (تیون شده مشابه کد سینوس: low تا 0.5، medium تا 1.2 برای lossهای بزرگ‌تر، high از 0.4)
 def membership_low(x):
     if x <= 0.1:
         return 1.0
@@ -10,20 +10,20 @@ def membership_low(x):
         return 0.0
 
 def membership_medium(x):
-    if x < 0.1 or x > 1.0:
+    if x < 0.1 or x > 1.2:
         return 0.0
     elif x < 0.3:
         return (x - 0.1) / (0.3 - 0.1)
-    elif x <= 0.8:
+    elif x <= 0.9:
         return 1.0
     else:
-        return (1.0 - x) / (1.0 - 0.8)
+        return (1.2 - x) / (1.2 - 0.9)
 
 def membership_high(x):
-    if x <= 0.5:
+    if x <= 0.4:
         return 0.0
     elif x < 0.8:
-        return (x - 0.5) / (0.8 - 0.5)
+        return (x - 0.4) / (0.8 - 0.4)
     else:
         return 1.0
 
@@ -44,11 +44,12 @@ def fuzzy_lr_scaling(avg_loss):
 def task_weight_fuzzy(avg_rel):
     """
     This function uses fuzzy logic to determine the weight of a task based on its reliability.
+    تیون شده: thresholds بر اساس توزیع واقعی Avg rel ≈0.39-0.51 برای تنوع بیشتر (کمتر ثابت 0.5 بشه)
     """
     # Example fuzzy rules for task weight based on average reliability
-    if avg_rel < 0.3:
+    if avg_rel < 0.4:
         return 0.8  # higher importance for tasks with lower reliability
-    elif avg_rel < 0.6:
+    elif avg_rel < 0.5:
         return 0.5  # medium importance for tasks with medium reliability
     else:
         return 0.2  # lower importance for tasks with higher reliability
