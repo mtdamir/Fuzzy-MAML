@@ -2,35 +2,16 @@ import sys
 import numpy as np
 import tensorflow as tf
 from utils import mse, xent, conv_block
-from fuzzy_utils import fuzzy_lr_scaling, task_weight_fuzzy  # import fuzzy functions
+from fuzzy_utils import fuzzy_lr_scaling  # task_weight_fuzzy حذف
 from rule_extractor import extract_fuzzy_rules  # import rule extractor
 
-try:
-    import special_grads
-except KeyError as e:
-    print("WARN: Cannot define MaxPoolGrad: %s" % e, file=sys.stderr)
-
 # ------------------------- Fuzzy helper functions -------------------------
-# sample‑level reliability for images: ترکیب brightness و variance (تیون: variance ضریب 0.5 برای تأثیر کمتر)
 @tf.function
 def reliability_image(batch_pixels):
     """Input [B, dim_input] in [0,1]; return [B] in [0,1]."""
     mean_pix = tf.reduce_mean(batch_pixels, axis=-1)  # brightness
     var_pix = tf.math.reduce_variance(batch_pixels, axis=-1)  # variance برای نویز/عدم قطعیت
-    return tf.clip_by_value(mean_pix * (1 - 0.5 * var_pix), 0.0, 1.0)  # تیون برای تنوع بیشتر
-
-# task‑level importance fuzzy rule (low/med/high based on avg reliability)
-@tf.function
-def task_weight_fuzzy(avg_rel):
-    # triangular membership
-    return tf.cond(avg_rel < 0.4, lambda: 0.8,
-                   lambda: tf.cond(avg_rel < 0.5, lambda: 0.5, lambda: 0.2))
-
-# meta‑lr scaling (same as before)
-@tf.function
-def fuzzy_lr_scaling(avg_loss):
-    return tf.cond(avg_loss < 0.5, lambda: 1.2,
-                   lambda: tf.cond(avg_loss < 1.0, lambda: 1.0, lambda: 0.8))
+    return tf.clip_by_value(mean_pix * (1 - 0.5 * var_pix), 0.0, 1.0)
 
 class MAML:
     def __init__(self, dim_input, dim_output, args):
@@ -38,7 +19,7 @@ class MAML:
         self.dim_output = dim_output
         self.update_lr = float(args.update_lr)
         self.meta_lr = float(args.meta_lr)
-        self.num_updates = int(args.num_updates)
+        self.num_updates = int(args.num_updates)  # حالا 3 در args
         self.meta_batch_size = int(args.meta_batch_size)
         self.num_classes = int(args.num_classes)
         self.datasource = args.datasource
@@ -59,7 +40,13 @@ class MAML:
             self.dim_hidden = self.num_filters
 
         self.weights = self._init_weights()
-        self.optimizer = tf.keras.optimizers.Adam(self.meta_lr)
+        
+        # Cosine decay scheduler
+        self.optimizer = tf.keras.optimizers.Adam(
+            learning_rate=tf.keras.optimizers.schedules.CosineDecay(
+                self.meta_lr, decay_steps=args.iters, alpha=0.01
+            )
+        )
 
     # ---------------- weight init (same as previous) -------------------------
     def _init_weights(self):
@@ -86,7 +73,17 @@ class MAML:
         w['b5'] = tf.Variable(tf.zeros([self.dim_output]))
         return w
 
-    # ---------------- forward (same as previous) -------------------------------
+    # اضافه: extract intermediate features (برای FCM روی features نه raw)
+    def extract_features(self, x, w):
+        x = tf.reshape(x, [-1, self.img_size, self.img_size, self.channels])
+        h = x
+        for i in range(1,5):
+            h = conv_block(h, w[f'conv{i}'], w[f'b{i}'], None, tf.nn.relu,
+                            'VALID' if self.max_pool else 'SAME')
+            h = tf.nn.relu(h)
+        h = tf.keras.layers.GlobalAveragePooling2D()(h)  # features قبل FC
+        return h
+
     def forward_fc(self, x, w):
         h = tf.nn.relu(tf.matmul(x, w['w1']) + w['b1'])
         h = tf.nn.relu(tf.matmul(h, w['w2']) + w['b2'])
@@ -103,7 +100,11 @@ class MAML:
         return tf.matmul(h, w['w5']) + w['b5']
 
     def forward(self, x, w):
-        return self.forward_fc(x, w) if not self.classification else self.forward_conv(x, w)
+        if not self.classification:
+            return self.forward_fc(x, w)
+        else:
+            h = self.extract_features(x, w)  # استفاده از extract_features
+            return tf.matmul(h, w['w5']) + w['b5']  # ادامه به logits
 
     # ---------------- meta‑train (with fuzzy logic) -------------------------------
     def meta_train_step(self, batch):
@@ -111,9 +112,13 @@ class MAML:
             meta_losses = []
             meta_accs = []  # لیست برای acc هر تسک
             task_weights = []
+            avg_rels = []  # برای dynamic thresholds
             for (xa, ya, ra, xb, yb) in batch:
+                # استخراج features به جای raw xa
+                features_a = self.extract_features(xa, self.weights).numpy()  # به numpy برای FCM
+
                 # ادغام FCM: استخراج عضویت‌ها برای وزن‌دهی فازی بیشتر
-                _, u = extract_fuzzy_rules(xa.numpy(), n_clusters=3, return_u=True)  # تغییر: return_u=True اضافه شده
+                _, u = extract_fuzzy_rules(features_a, n_clusters=5, return_u=True)  # n=5
                 u_mean = tf.reduce_mean(tf.convert_to_tensor(u, dtype=tf.float32), axis=1)  # میانگین عضویت per sample
                 
                 # inner loop
@@ -138,8 +143,21 @@ class MAML:
                 true_classes = tf.argmax(yb, axis=1)
                 acc_b = tf.reduce_mean(tf.cast(tf.equal(pred_classes, true_classes), tf.float32))
                 
-                # fuzzy task importance based on avg reliability
-                task_weight = task_weight_fuzzy(tf.reduce_mean(ra))
+                # جمع avg_rel برای dynamic
+                avg_rel = tf.reduce_mean(ra)
+                avg_rels.append(avg_rel)
+                
+                # dynamic task_weight_fuzzy
+                if avg_rels:  # بعد اولین
+                    rel_mean = tf.reduce_mean(avg_rels)
+                    rel_std = tf.math.reduce_std(avg_rels)
+                    low_thresh = rel_mean - rel_std
+                    high_thresh = rel_mean
+                    task_weight = tf.cond(avg_rel < low_thresh, lambda: 0.8,
+                                          lambda: tf.cond(avg_rel < high_thresh, lambda: 0.5, lambda: 0.2))
+                else:
+                    task_weight = 0.5  # default برای اولین
+                
                 meta_losses.append(task_weight * loss_b)
                 meta_accs.append(acc_b)  # acc بدون وزن‌دهی (برای لاگ میانگین ساده)
                 task_weights.append(task_weight)
@@ -150,6 +168,11 @@ class MAML:
         # outer gradients
         grads = outer_tape.gradient(meta_loss, list(self.weights.values()))
         grads = [g if g is not None else tf.zeros_like(v) for g,v in zip(grads, self.weights.values())]
+        
+        # fuzzy scaling on grads
+        scale = fuzzy_lr_scaling(meta_loss)
+        grads = [g * scale if g is not None else None for g in grads]
+        
         self.optimizer.apply_gradients(zip(grads, self.weights.values()))
 
         # return meta_loss, meta_acc, mean_task_weights برای logging

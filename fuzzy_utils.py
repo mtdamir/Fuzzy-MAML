@@ -1,31 +1,17 @@
 import numpy as np
 
-# Functions for fuzzy membership (تیون شده مشابه کد سینوس: low تا 0.5، medium تا 1.2 برای lossهای بزرگ‌تر، high از 0.4)
+# Gaussian membership functions (mean و sigma تیون شده بر اساس thresholds قبلی)
+def gaussmf(x, mean, sigma):
+    return np.exp(-((x - mean)**2) / (2 * sigma**2))
+
 def membership_low(x):
-    if x <= 0.1:
-        return 1.0
-    elif x < 0.5:
-        return (0.5 - x) / (0.5 - 0.1)
-    else:
-        return 0.0
+    return gaussmf(x, 0.3, 0.2)  # peak در 0.3 (بین 0.1-0.5)
 
 def membership_medium(x):
-    if x < 0.1 or x > 1.2:
-        return 0.0
-    elif x < 0.3:
-        return (x - 0.1) / (0.3 - 0.1)
-    elif x <= 0.9:
-        return 1.0
-    else:
-        return (1.2 - x) / (1.2 - 0.9)
+    return gaussmf(x, 0.6, 0.3)  # peak در 0.6 (بین 0.1-1.2)
 
 def membership_high(x):
-    if x <= 0.4:
-        return 0.0
-    elif x < 0.8:
-        return (x - 0.4) / (0.8 - 0.4)
-    else:
-        return 1.0
+    return gaussmf(x, 0.9, 0.3)  # peak در 0.9 (از 0.4+)
 
 def fuzzy_lr_scaling(avg_loss):
     """
@@ -41,15 +27,4 @@ def fuzzy_lr_scaling(avg_loss):
         return 1.0
     return (low_m * 1.2 + med_m * 1.0 + high_m * 0.8) / denom
 
-def task_weight_fuzzy(avg_rel):
-    """
-    This function uses fuzzy logic to determine the weight of a task based on its reliability.
-    تیون شده: thresholds بر اساس توزیع واقعی Avg rel ≈0.39-0.51 برای تنوع بیشتر (کمتر ثابت 0.5 بشه)
-    """
-    # Example fuzzy rules for task weight based on average reliability
-    if avg_rel < 0.4:
-        return 0.8  # higher importance for tasks with lower reliability
-    elif avg_rel < 0.5:
-        return 0.5  # medium importance for tasks with medium reliability
-    else:
-        return 0.2  # lower importance for tasks with higher reliability
+# task_weight_fuzzy حالا در maml.py dynamic می‌شه، اینجا حذف

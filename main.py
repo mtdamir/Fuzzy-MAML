@@ -4,7 +4,7 @@ import random
 import numpy as np
 import tensorflow as tf
 from data_generator import DataGenerator
-from maml import MAML, reliability_image, fuzzy_lr_scaling, task_weight_fuzzy
+from maml import MAML, reliability_image, fuzzy_lr_scaling
 from rule_extractor import extract_fuzzy_rules
 from fuzzy_utils import fuzzy_lr_scaling  # برای scaling تیون شده
 
@@ -47,14 +47,14 @@ parser.add_argument('--num_classes',     type=int,   default=5)
 parser.add_argument('--meta_batch_size', type=int,   default=4)
 parser.add_argument('--update_batch_size', type=int, default=5)
 parser.add_argument('--query_batch_size',  type=int, default=15)
-parser.add_argument('--num_updates',      type=int,   default=5)
+parser.add_argument('--num_updates',      type=int,   default=3)
 parser.add_argument('--meta_lr',          type=float, default=1e-3)
 parser.add_argument('--update_lr',        type=float, default=1e-2)
 parser.add_argument('--iters',            type=int,   default=10000)  # افزایش به 20000 برای آموزش بهتر
 parser.add_argument('--seed',             type=int,   default=42)
 args = parser.parse_args()
 
-# ---------------------------------------------------------------------------
+# --------------------------------------------------------------------------- 
 # Reproducibility
 # ---------------------------------------------------------------------------
 random.seed(args.seed)
@@ -119,23 +119,20 @@ def sample_meta_batch():
 # ---------------------------------------------------------------------------
 for it in range(args.iters):
     meta_batch = sample_meta_batch()
-    meta_loss, meta_acc, _ = maml.meta_train_step(meta_batch)  # حالا meta_acc هم برمی‌گرده
+    meta_loss, meta_acc, mean_task_weights = maml.meta_train_step(meta_batch)  # حالا meta_acc هم برمی‌گرده
 
     # --- logging ---
     if it % 100 == 0:
         print(f'Iter {it:6d} │ meta‑loss = {meta_loss.numpy():.4f} │ meta‑acc = {meta_acc.numpy():.4f}')
-        # fuzzy adjustment of meta learning-rate
-        scale = fuzzy_lr_scaling(meta_loss)
-        maml.optimizer.learning_rate.assign(args.meta_lr * scale)
 
         # استخراج رول‌ها و اعمال آنها بر تسک‌ها
         for (xa, ya, ra, xb, yb) in meta_batch:
             avg_rel = tf.reduce_mean(ra)
-            task_weight = task_weight_fuzzy(avg_rel)
-            print(f"Avg rel: {avg_rel.numpy():.4f} │ Task Weight: {task_weight.numpy()}")  # اضافه کردن پرینت avg_rel برای دیباگ
+            print(f"Avg rel: {avg_rel.numpy():.4f} │ Task Weight: {mean_task_weights.numpy()}")  # از mean استفاده کن
 
         # استخراج قوانین فازی برای تسک‌ها (حالا با FCM)
-        fuzzy_rules = extract_fuzzy_rules(xa.numpy(), n_clusters=3)
+        features_a = maml.extract_features(xa, maml.weights).numpy()  # برای سازگاری با FCM روی features
+        fuzzy_rules = extract_fuzzy_rules(features_a, n_clusters=5)
         print(f"Extracted Fuzzy Rules (FCM-based): {fuzzy_rules}")
 
 print('Training finished.')

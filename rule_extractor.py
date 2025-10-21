@@ -1,18 +1,32 @@
 from sklearn.cluster import KMeans
+from sklearn.decomposition import PCA  # اضافه شده
 import numpy as np
 
 # FCM دستی با NumPy (برای سازگاری با محیط – تست شده)
-def fuzzy_cmeans(data, n_clusters, m=2.0, max_iter=100, error=1e-5):
+def fuzzy_cmeans(data, n_clusters=5, m=2.5, max_iter=100, error=1e-5):  # n_clusters=5, m=2.5
     """
     پیاده‌سازی FCM: بازگشت مراکز و عضویت‌ها (u)
     data: (n_samples, n_features)
     m: فازی‌ساز (معمولاً 2)
     """
     n_samples, n_features = data.shape
-    # عضویت‌های اولیه رندوم
-    u = np.random.dirichlet(np.ones(n_clusters), size=n_samples)
-    # مراکز اولیه رندوم
-    centers = np.random.rand(n_clusters, n_features)
+    
+    # PCA برای کاهش dim (dynamic n_components)
+    if n_features > 100:  # threshold دلخواه
+        n_comp = min(n_samples - 1, 100)
+        pca = PCA(n_components=n_comp)
+        data = pca.fit_transform(data)
+        n_features = n_comp  # بروزرسانی
+    
+    # KMeans برای initial centers
+    kmeans = KMeans(n_clusters=n_clusters, random_state=0)
+    kmeans.fit(data)
+    centers = kmeans.cluster_centers_
+    
+    # عضویت‌های اولیه بر اساس فاصله به centers
+    dist = np.linalg.norm(data[:, np.newaxis] - centers, axis=2) + 1e-10
+    u = 1.0 / (dist ** (2 / (m - 1)))
+    u = (u.T / np.sum(u, axis=1)).T  # نرمالایز
     
     for it in range(max_iter):
         u_old = u.copy()
@@ -20,9 +34,9 @@ def fuzzy_cmeans(data, n_clusters, m=2.0, max_iter=100, error=1e-5):
         um = u ** m
         centers = (um.T @ data) / np.sum(um, axis=0)[:, np.newaxis]
         # به‌روزرسانی عضویت‌ها
-        dist = np.linalg.norm(data[:, np.newaxis] - centers, axis=2) + 1e-10  # جلوگیری از تقسیم بر صفر
+        dist = np.linalg.norm(data[:, np.newaxis] - centers, axis=2) + 1e-10
         u = 1.0 / (dist ** (2 / (m - 1)))
-        u = (u.T / np.sum(u, axis=1)).T  # نرمالایز ردیفی
+        u = (u.T / np.sum(u, axis=1)).T
         
         # چک همگرایی
         if np.linalg.norm(u - u_old) < error:
@@ -31,7 +45,7 @@ def fuzzy_cmeans(data, n_clusters, m=2.0, max_iter=100, error=1e-5):
     return centers, u
 
 # Function to extract rules based on fuzzy clustering (FCM حالا استفاده می‌شه)
-def extract_fuzzy_rules(data, n_clusters=3, return_u=False):
+def extract_fuzzy_rules(data, n_clusters=5, return_u=False):  # n_clusters=5
     """
     This function uses fuzzy clustering (FCM) to extract rules for the dataset.
     - n_clusters: number of fuzzy clusters to create
@@ -56,9 +70,3 @@ def extract_fuzzy_rules(data, n_clusters=3, return_u=False):
     if return_u:
         return centers, u  # برای ادغام در maml
     return rules
-
-# Example usage with random data (for demonstration purposes) – حذف اگر لازم نیست
-data = np.random.rand(100, 5)  # 100 samples, 5 features
-rules = extract_fuzzy_rules(data)
-for rule in rules:
-    print(rule)
